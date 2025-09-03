@@ -1,5 +1,5 @@
 import os
-import fitz  
+import fitz 
 import tempfile
 from typing import List
 import json
@@ -20,7 +20,6 @@ def highlight_pdf_with_rondas_folios(
     temp_output_fd, temp_output_path = tempfile.mkstemp(suffix=".pdf")
     os.close(temp_output_fd)
 
-
     folio_to_info_map = {
         str(carga.get("folio", "")).strip().upper(): {
             "ronda": carga.get("ronda", 1),
@@ -32,9 +31,7 @@ def highlight_pdf_with_rondas_folios(
 
     folios_ids_from_cargas = list(folio_to_info_map.keys())
 
-   
     search_flags = fitz.TEXT_DEHYPHENATE | fitz.TEXT_PRESERVE_WHITESPACE
-
 
     X_OFFSET_ANNOTATIONS = 0
     Y_OFFSET_ABOVE_DEPT = -13
@@ -230,8 +227,7 @@ def procesar_pdf():
     "SMI10", "SNI10", "SPM10", "SSO10", "STO10", "TAM30", "TMB10",
     "TMB11", "TMB12", "TRX20", "TRX40", "TTI06", "TTI50", "VPS10",
     "AAB80", "AAS10", "AAV10", "AAH30", "AHG10"
-];
-
+    ]
 
     output_path = highlight_pdf_with_rondas_folios(
         input_path,
@@ -255,6 +251,3 @@ def procesar_pdf():
             print(f"Error durante la limpieza de archivos temporales: {e}")
 
     return response
-
-if __name__ == "__main__":
-    app.run(debug=True, port=5003)
