@@ -1,5 +1,5 @@
 import os
-import fitz  # PyMuPDF
+import fitz
 import tempfile
 from typing import List
 import json
@@ -7,7 +7,6 @@ from flask import Flask, request, send_file
 from flask_cors import CORS
 
 app = Flask(__name__)
-# Permitir CORS desde cualquier origen
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 def highlight_pdf_with_rondas_folios(
@@ -16,14 +15,11 @@ def highlight_pdf_with_rondas_folios(
     cargas: List[dict],
     num_casillas_extra: int = 14,
 ) -> str:
-    # Existing function content...
+    # Your existing function code remains the same as it is not the source of the error.
     doc = fitz.open(pdf_path)
-
-    # Archivo temporal de salida
     temp_output_fd, temp_output_path = tempfile.mkstemp(suffix=".pdf")
     os.close(temp_output_fd)
-
-    # Sanitizar folios
+    
     folio_to_info_map = {
         str(carga.get("folio", "")).strip().upper(): {
             "ronda": carga.get("ronda", 1),
@@ -33,9 +29,7 @@ def highlight_pdf_with_rondas_folios(
         for carga in cargas if carga.get("folio")
     }
     folios_ids_from_cargas = list(folio_to_info_map.keys())
-
     search_flags = fitz.TEXT_DEHYPHENATE | fitz.TEXT_PRESERVE_WHITESPACE
-
     X_OFFSET_ANNOTATIONS = 0
     Y_OFFSET_ABOVE_DEPT = -13
     X_OFFSET_RIGHT_OF_LABEL = 5
@@ -66,7 +60,6 @@ def highlight_pdf_with_rondas_folios(
                     closest_folio_data = folio_to_info_map[folio_entry['folio_id']]
             return closest_folio_data
 
-        # --- Departamento ---
         for dept_rect in page.search_for("Departamento", flags=search_flags):
             data = find_closest_folio_data(dept_rect)
             if data:
@@ -80,7 +73,6 @@ def highlight_pdf_with_rondas_folios(
                 annot = page.add_freetext_annot(text_rect, ronda_text, fontsize=10, fontname="helvB", text_color=(0,0,0))
                 annot.update()
 
-        # --- Operador ---
         for operador_rect in page.search_for("Operador:", flags=search_flags):
             data = find_closest_folio_data(operador_rect)
             if data:
@@ -93,7 +85,6 @@ def highlight_pdf_with_rondas_folios(
                 annot = page.add_freetext_annot(text_rect, data['operario'], fontsize=10, fontname="helvB", text_color=(0,0,0))
                 annot.update()
 
-        # --- Equipo ---
         for equipo_rect in page.search_for("Equipo:", flags=search_flags):
             data = find_closest_folio_data(equipo_rect)
             if data:
@@ -106,7 +97,6 @@ def highlight_pdf_with_rondas_folios(
                 annot = page.add_freetext_annot(text_rect, data['maquina'], fontsize=10, fontname="helvB", text_color=(0,0,0))
                 annot.update()
 
-        # --- Resaltado de códigos ---
         for search_text in search_texts:
             try:
                 code = search_text.strip().upper()
@@ -133,26 +123,25 @@ def highlight_pdf_with_rondas_folios(
 
 @app.route("/procesar_pdf", methods=["POST"])
 def procesar_pdf():
-    if "file" not in request.files:
-        return "No se subió ningún archivo", 400
-
-    cargas_data = request.form.get("cargas", "[]")
-    try:
-        cargas = json.loads(cargas_data)
-    except json.JSONDecodeError:
-        return "Formato de 'cargas' inválido", 400
-
-    file = request.files["file"]
     input_path = None
     output_path = None
-
     try:
-        # Archivo temporal de entrada
+        if "file" not in request.files:
+            return "No se subió ningún archivo", 400
+
+        cargas_data = request.form.get("cargas", "[]")
+        try:
+            cargas = json.loads(cargas_data)
+        except json.JSONDecodeError:
+            return "Formato de 'cargas' inválido", 400
+
+        file = request.files["file"]
+
+        # Save the uploaded file to a temporary location
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp_in:
             file.save(tmp_in.name)
             input_path = tmp_in.name
 
-        # --- Lista completa de códigos ---
         search_terms = [
             "AAE70", "AAM10", "AAM11", "AAM12", "AAN20", "AAN30", "AAN50",
             "AAP10", "AAY10", "ABA10", "ABA20", "ABA30", "ABA31", "ABB20",
@@ -204,6 +193,7 @@ def procesar_pdf():
 
         output_path = highlight_pdf_with_rondas_folios(input_path, search_terms, cargas)
 
+        # Send the file back to the client
         response = send_file(
             output_path,
             as_attachment=True,
@@ -214,10 +204,11 @@ def procesar_pdf():
 
     except Exception as e:
         print(f"Error procesando PDF: {str(e)}")
+        # Return a 500 error with a message
         return f"Error procesando PDF: {str(e)}", 500
 
     finally:
-        # Cleanup files regardless of outcome
+        # This block ensures temporary files are cleaned up, regardless of errors
         if input_path and os.path.exists(input_path):
             os.remove(input_path)
         if output_path and os.path.exists(output_path):
