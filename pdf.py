@@ -132,8 +132,8 @@ def procesar_pdf():
         file.save(tmp_in.name)
         input_path = tmp_in.name
 
-      search_terms = [
-    "AAE70", "AAM10", "AAM11", "AAM12", "AAN20", "AAN30", "AAN50",
+    search_terms = [
+         "AAE70", "AAM10", "AAM11", "AAM12", "AAN20", "AAN30", "AAN50",
     "AAP10", "AAY10", "ABA10", "ABA20", "ABA30", "ABA31", "ABB20",
     "ABL10", "ABV30", "ACA10", "ACC10", "ACC20", "ACT20", "ADC10",
     "ADC30", "ADG10", "ADI10", "ADI20", "ADI30", "ADL10", "ADN10",
@@ -179,7 +179,8 @@ def procesar_pdf():
     "SMI10", "SNI10", "SPM10", "SSO10", "STO10", "TAM30", "TMB10",
     "TMB11", "TMB12", "TRX20", "TRX40", "TTI06", "TTI50", "VPS10",
     "AAB80", "AAS10", "AAV10", "AAH30", "AHG10"
-]
+        
+    ]
 
     try:
         output_path = highlight_pdf_with_rondas_folios(input_path, search_terms, cargas)
