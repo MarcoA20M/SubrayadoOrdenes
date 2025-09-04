@@ -164,6 +164,27 @@ def highlight_pdf_with_rondas_folios(
 
 @app.route("/procesar_pdf", methods=["POST"])
 def procesar_pdf():
+    """
+    Función que maneja la solicitud POST para procesar un archivo PDF.
+
+    **NOTA IMPORTANTE SOBRE EL TIEMPO DE ESPERA (TIMEOUT):**
+    Los registros de error indican que el trabajador de Gunicorn se está agotando
+    el tiempo de espera (`WORKER TIMEOUT`), lo que hace que el proceso falle
+    y el servidor se reinicie. Esto ocurre porque el procesamiento de PDF para un
+    documento grande y una larga lista de términos de búsqueda tarda más de 30 segundos
+    (el tiempo de espera predeterminado de Gunicorn en Render).
+
+    Para solucionar esto, necesitas aumentar el tiempo de espera de Gunicorn en la
+    configuración de tu servicio en Render. En el panel de control de Render, ve a:
+    Settings -> Environment -> Add Environment Variable.
+
+    Añade las siguientes variables y valores:
+    - **Key:** `GUNICORN_CMD_ARGS`
+    - **Value:** `--timeout 120` (o un valor mayor, como 300, si es necesario)
+
+    Esto aumentará el tiempo de espera a 120 segundos, dándole al servidor más
+    tiempo para procesar la solicitud.
+    """
     try:
         if "file" not in request.files:
             return jsonify({"error": "No se subió ningún archivo."}), 400
