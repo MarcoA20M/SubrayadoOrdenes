@@ -5,47 +5,30 @@ from typing import List
 import json
 from flask import Flask, request, send_file, jsonify
 from flask_cors import CORS
-
-# En un entorno de producción como Render, el frontend debe llamar a la URL pública del servicio.
-# El puerto 8080 solo se usa para desarrollo local, por lo que lo hemos quitado del código.
-# Gunicorn se encargará de usar la variable de entorno $PORT en Render.
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 app = Flask(__name__)
-# Configuración de CORS para permitir todas las solicitudes desde cualquier origen.
 CORS(app)
 
-def highlight_pdf_with_rondas_folios(
+def _process_single_page(
     pdf_path: str,
+    page_num: int,
     search_texts: List[str],
-    cargas: List[dict],
-    num_casillas_extra: int = 14,
+    folio_to_info_map: dict,
+    num_casillas_extra: int,
 ) -> str:
     """
-    Procesa un PDF para resaltar términos y añadir anotaciones basadas en una lista de cargas.
+    Procesa una sola página del PDF, añade anotaciones y resaltados, y la guarda
+    en un archivo temporal.
     """
-    doc = fitz.open(pdf_path)
-    temp_output_fd, temp_output_path = tempfile.mkstemp(suffix=".pdf")
-    os.close(temp_output_fd)
-
-    folio_to_info_map = {
-        str(carga.get("folio", "")).strip().upper(): {
-            "ronda": carga.get("ronda", 1),
-            "maquina": carga.get("maquina", "N/A"),
-            "operario": carga.get("operario", "N/A")
-        }
-        for carga in cargas if carga.get("folio") is not None
-    }
-    folios_ids_from_cargas = list(folio_to_info_map.keys())
-    search_flags = fitz.TEXT_DEHYPHENATE | fitz.TEXT_PRESERVE_WHITESPACE
-
-    X_OFFSET_ANNOTATIONS = 0
-    Y_OFFSET_ABOVE_DEPT = -13
-    X_OFFSET_RIGHT_OF_LABEL = 5
-    ANNOTATION_WIDTH = 200
-    ANNOTATION_HEIGHT = 15
-
-    for page_idx, page in enumerate(doc):
+    try:
+        doc = fitz.open(pdf_path)
+        page = doc[page_num]
+        
         all_folios_rects_on_page = []
+        folios_ids_from_cargas = list(folio_to_info_map.keys())
+        search_flags = fitz.TEXT_DEHYPHENATE | fitz.TEXT_PRESERVE_WHITESPACE
+
         for folio_id in folios_ids_from_cargas:
             instances = page.search_for(folio_id, flags=search_flags)
             for inst in instances:
@@ -76,10 +59,8 @@ def highlight_pdf_with_rondas_folios(
             if relevant_folio_data:
                 ronda_text = f"Ronda {relevant_folio_data['ronda']}"
                 text_rect = fitz.Rect(
-                    dept_rect.x0 + X_OFFSET_ANNOTATIONS,
-                    dept_rect.y0 + Y_OFFSET_ABOVE_DEPT,
-                    dept_rect.x0 + X_OFFSET_ANNOTATIONS + ANNOTATION_WIDTH,
-                    dept_rect.y0 + Y_OFFSET_ABOVE_DEPT + ANNOTATION_HEIGHT
+                    dept_rect.x0, dept_rect.y0 - 13,
+                    dept_rect.x0 + 200, dept_rect.y0 - 13 + 15
                 )
                 annot = page.add_freetext_annot(
                     text_rect,
@@ -99,10 +80,8 @@ def highlight_pdf_with_rondas_folios(
             if relevant_folio_data:
                 operario_text = f"{relevant_folio_data['operario']}"
                 text_rect = fitz.Rect(
-                    operador_rect.x1 + X_OFFSET_RIGHT_OF_LABEL,
-                    operador_rect.y0,
-                    operador_rect.x1 + X_OFFSET_RIGHT_OF_LABEL + ANNOTATION_WIDTH,
-                    operador_rect.y0 + ANNOTATION_HEIGHT
+                    operador_rect.x1 + 5, operador_rect.y0,
+                    operador_rect.x1 + 5 + 200, operador_rect.y0 + 15
                 )
                 annot = page.add_freetext_annot(
                     text_rect,
@@ -122,10 +101,8 @@ def highlight_pdf_with_rondas_folios(
             if relevant_folio_data:
                 maquina_text = f"{relevant_folio_data['maquina']}"
                 text_rect = fitz.Rect(
-                    equipo_rect.x1 + X_OFFSET_RIGHT_OF_LABEL,
-                    equipo_rect.y0,
-                    equipo_rect.x1 + X_OFFSET_RIGHT_OF_LABEL + ANNOTATION_WIDTH,
-                    equipo_rect.y0 + ANNOTATION_HEIGHT
+                    equipo_rect.x1 + 5, equipo_rect.y0,
+                    equipo_rect.x1 + 5 + 200, equipo_rect.y0 + 15
                 )
                 annot = page.add_freetext_annot(
                     text_rect,
@@ -153,9 +130,67 @@ def highlight_pdf_with_rondas_folios(
                 highlight = page.add_highlight_annot(extended_rect)
                 highlight.set_colors(stroke=(0.7, 0.7, 0.7))
                 highlight.update()
+        
+        # Guardar la página procesada en un archivo temporal y devolver la ruta
+        temp_output_fd, temp_output_path = tempfile.mkstemp(suffix=".pdf")
+        os.close(temp_output_fd)
+        doc.save(temp_output_path)
+        doc.close()
+        return temp_output_path
+        
+    except Exception as e:
+        print(f"Error procesando la página {page_num}: {e}")
+        return None
 
-    doc.save(temp_output_path)
+def highlight_pdf_with_rondas_folios(
+    pdf_path: str,
+    search_texts: List[str],
+    cargas: List[dict],
+    num_casillas_extra: int = 14,
+) -> str:
+    """
+    Procesa un PDF para resaltar términos y añadir anotaciones usando
+    multiprocesamiento para mejorar el rendimiento.
+    """
+    doc = fitz.open(pdf_path)
+    folio_to_info_map = {
+        str(carga.get("folio", "")).strip().upper(): {
+            "ronda": carga.get("ronda", 1),
+            "maquina": carga.get("maquina", "N/A"),
+            "operario": carga.get("operario", "N/A")
+        }
+        for carga in cargas if carga.get("folio") is not None
+    }
+    
+    # Usar un ProcessPoolExecutor para procesar las páginas en paralelo
+    processed_page_paths = []
+    with ProcessPoolExecutor(max_workers=os.cpu_count() or 1) as executor:
+        futures = {executor.submit(_process_single_page, pdf_path, i, search_texts, folio_to_info_map, num_casillas_extra): i for i in range(doc.page_count)}
+        
+        for future in as_completed(futures):
+            path = future.result()
+            if path:
+                processed_page_paths.append(path)
+
     doc.close()
+    
+    # Juntar las páginas procesadas en un solo PDF final
+    if not processed_page_paths:
+        return "" # O manejar el error
+        
+    final_doc = fitz.open()
+    processed_page_paths.sort()  # Asegurar el orden
+    for path in processed_page_paths:
+        processed_page_doc = fitz.open(path)
+        final_doc.insert_pdf(processed_page_doc)
+        processed_page_doc.close()
+        os.remove(path) # Limpiar el archivo temporal
+
+    temp_output_fd, temp_output_path = tempfile.mkstemp(suffix=".pdf")
+    os.close(temp_output_fd)
+    final_doc.save(temp_output_path)
+    final_doc.close()
+    
     return temp_output_path
 
 
@@ -234,6 +269,8 @@ def procesar_pdf():
             search_terms,
             cargas
         )
+        if not output_path:
+            return jsonify({"error": "No se pudo procesar el PDF."}), 500
 
         response = send_file(
             output_path,
