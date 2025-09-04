@@ -6,223 +6,190 @@ import json
 from flask import Flask, request, send_file
 from flask_cors import CORS
 
+# En un entorno de producción como Render, el frontend debe llamar a la URL pública del servicio.
+# El puerto 8080 solo se usa para desarrollo local, por lo que lo hemos quitado del código.
+# Gunicorn se encargará de usar la variable de entorno $PORT en Render.
+
 app = Flask(__name__)
-
-# Configuración CORS más robusta
-CORS(app, resources={
-    r"/procesar_pdf": {
-        "origins": ["http://localhost:8080", "http://localhost:3000", "http://127.0.0.1:8080"],
-        "methods": ["POST", "OPTIONS"],
-        "allow_headers": ["Content-Type", "Authorization"],
-        "supports_credentials": True
-    }
-})
-
-# Headers CORS manuales para mayor seguridad
-@app.after_request
-def after_request(response):
-    response.headers.add('Access-Control-Allow-Origin', 'http://localhost:8080')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Authorization')
-    response.headers.add('Access-Control-Allow-Methods', 'POST, OPTIONS, GET')
-    response.headers.add('Access-Control-Allow-Credentials', 'true')
-    return response
+# Permitir CORS desde cualquier origen. Para producción, se recomienda restringir esto a la URL de tu frontend.
+CORS(app) 
 
 def highlight_pdf_with_rondas_folios(
     pdf_path: str,
     search_texts: List[str],
     cargas: List[dict],
     num_casillas_extra: int = 14,
-    max_pages: int = 100  # Límite de páginas para evitar timeout
 ) -> str:
-    """
-    Procesa PDF y añade anotaciones optimizado para Render
-    """
-    try:
-        doc = fitz.open(pdf_path)
-        temp_output_fd, temp_output_path = tempfile.mkstemp(suffix=".pdf")
-        os.close(temp_output_fd)
-        
-        # Mapa optimizado de folios
-        folio_to_info_map = {}
-        for carga in cargas:
-            folio = str(carga.get("folio", "")).strip().upper()
-            if folio:
-                folio_to_info_map[folio] = {
-                    "ronda": carga.get("ronda", 1),
-                    "maquina": carga.get("maquina", "N/A"),
-                    "operario": carga.get("operario", "N/A")
-                }
-        
-        folios_ids_from_cargas = list(folio_to_info_map.keys())
-        search_flags = fitz.TEXT_DEHYPHENATE | fitz.TEXT_PRESERVE_WHITESPACE
-        
-        # Constantes para anotaciones
-        X_OFFSET_ANNOTATIONS = 0
-        Y_OFFSET_ABOVE_DEPT = -13
-        X_OFFSET_RIGHT_OF_LABEL = 5
-        ANNOTATION_WIDTH = 200
-        ANNOTATION_HEIGHT = 15
+    doc = fitz.open(pdf_path)
 
-        # Limitar número de páginas procesadas
-        total_pages = min(len(doc), max_pages)
-        
-        for page_idx in range(total_pages):
-            page = doc[page_idx]
-            all_folios_rects_on_page = []
-            
-            # Buscar folios en la página actual
-            for folio_id in folios_ids_from_cargas:
-                try:
-                    instances = page.search_for(folio_id, flags=search_flags)
-                    for inst in instances:
-                        all_folios_rects_on_page.append({'folio_id': folio_id, 'rect': inst})
-                except:
-                    continue
+    temp_output_fd, temp_output_path = tempfile.mkstemp(suffix=".pdf")
+    os.close(temp_output_fd)
 
-            def find_closest_folio_data(target_rect):
-                if not all_folios_rects_on_page:
-                    return None
-                closest_folio_data = None
-                min_distance = float('inf')
-                target_center_x = target_rect.x0 + target_rect.width / 2
-                target_center_y = target_rect.y0 + target_rect.height / 2
-                
-                for folio_entry in all_folios_rects_on_page:
-                    folio_rect = folio_entry['rect']
-                    folio_center_x = folio_rect.x0 + folio_rect.width / 2
-                    folio_center_y = folio_rect.y0 + folio_rect.height / 2
-                    distance = ((target_center_x - folio_center_x)**2 + (target_center_y - folio_center_y)**2)**0.5
-                    if distance < min_distance:
-                        min_distance = distance
-                        closest_folio_data = folio_to_info_map[folio_entry['folio_id']]
-                return closest_folio_data
 
-            # Procesar departamentos
-            try:
-                for dept_rect in page.search_for("Departamento", flags=search_flags):
-                    data = find_closest_folio_data(dept_rect)
-                    if data:
-                        ronda_text = f"Ronda {data['ronda']}"
-                        text_rect = fitz.Rect(
-                            dept_rect.x0 + X_OFFSET_ANNOTATIONS,
-                            dept_rect.y0 + Y_OFFSET_ABOVE_DEPT,
-                            dept_rect.x0 + X_OFFSET_ANNOTATIONS + ANNOTATION_WIDTH,
-                            dept_rect.y0 + Y_OFFSET_ABOVE_DEPT + ANNOTATION_HEIGHT
-                        )
-                        annot = page.add_freetext_annot(text_rect, ronda_text, fontsize=10, fontname="helv", text_color=(0,0,0))
-                        annot.update()
-            except:
-                pass
+    folio_to_info_map = {
+        str(carga.get("folio", "")).strip().upper(): {
+            "ronda": carga.get("ronda", 1),
+            "maquina": carga.get("maquina", "N/A"),
+            "operario": carga.get("operario", "N/A")
+        }
+        for carga in cargas if carga.get("folio") is not None
+    }
 
-            # Procesar operador
-            try:
-                for operador_rect in page.search_for("Operador:", flags=search_flags):
-                    data = find_closest_folio_data(operador_rect)
-                    if data:
-                        text_rect = fitz.Rect(
-                            operador_rect.x1 + X_OFFSET_RIGHT_OF_LABEL,
-                            operador_rect.y0,
-                            operador_rect.x1 + X_OFFSET_RIGHT_OF_LABEL + ANNOTATION_WIDTH,
-                            operador_rect.y0 + ANNOTATION_HEIGHT
-                        )
-                        annot = page.add_freetext_annot(text_rect, data['operario'], fontsize=10, fontname="helv", text_color=(0,0,0))
-                        annot.update()
-            except:
-                pass
+    folios_ids_from_cargas = list(folio_to_info_map.keys())
 
-            # Procesar equipo
-            try:
-                for equipo_rect in page.search_for("Equipo:", flags=search_flags):
-                    data = find_closest_folio_data(equipo_rect)
-                    if data:
-                        text_rect = fitz.Rect(
-                            equipo_rect.x1 + X_OFFSET_RIGHT_OF_LABEL,
-                            equipo_rect.y0,
-                            equipo_rect.x1 + X_OFFSET_RIGHT_OF_LABEL + ANNOTATION_WIDTH,
-                            equipo_rect.y0 + ANNOTATION_HEIGHT
-                        )
-                        annot = page.add_freetext_annot(text_rect, data['maquina'], fontsize=10, fontname="helv", text_color=(0,0,0))
-                        annot.update()
-            except:
-                pass
-
-            # Procesar términos de búsqueda (limitado a 50 por página)
-            search_terms_processed = 0
-            for search_text in search_texts:
-                if search_terms_processed >= 50:  # Límite por página
-                    break
-                    
-                try:
-                    code = search_text.strip().upper()
-                    if not code:
-                        continue
-                    
-                    instances = page.search_for(code, flags=search_flags)
-                    if not instances:
-                        continue
-                        
-                    last_instance = instances[-1]
-                    estimated_char_width = last_instance.width / len(code)
-                    estimated_width_per_casilla = 15 if estimated_char_width < 5 else estimated_char_width * 3
-                    extra_width = estimated_width_per_casilla * num_casillas_extra
-                    extended_rect = fitz.Rect(last_instance.x0, last_instance.y0, last_instance.x1 + extra_width, last_instance.y1)
-                    
-                    highlight = page.add_highlight_annot(extended_rect)
-                    highlight.set_colors(stroke=(0.7, 0.7, 0.7))
-                    highlight.update()
-                    
-                    search_terms_processed += 1
-                    
-                except Exception as e:
-                    print(f"Error resaltando {search_text}: {e}")
-                    continue
-
-        # Guardar optimizado
-        doc.save(temp_output_path, garbage=4, deflate=True, clean=True)
-        doc.close()
-        return temp_output_path
-        
-    except Exception as e:
-        print(f"Error crítico en highlight_pdf_with_rondas_folios: {e}")
-        raise
-
-@app.route("/procesar_pdf", methods=["POST", "OPTIONS"])
-def procesar_pdf():
-    """
-    Endpoint principal para procesar PDFs
-    """
-    input_path = None
-    output_path = None
     
+    search_flags = fitz.TEXT_DEHYPHENATE | fitz.TEXT_PRESERVE_WHITESPACE
+
+
+    X_OFFSET_ANNOTATIONS = 0
+    Y_OFFSET_ABOVE_DEPT = -13
+    X_OFFSET_RIGHT_OF_LABEL = 5
+    ANNOTATION_WIDTH = 200
+    ANNOTATION_HEIGHT = 15
+
+    for page_idx, page in enumerate(doc):
+        print(f"\n--- Página {page_idx + 1} ---")
+        all_folios_rects_on_page = []
+        for folio_id in folios_ids_from_cargas:
+            instances = page.search_for(folio_id, flags=search_flags)
+            if instances:
+                print(f"✔ Folio encontrado: {folio_id}")
+            else:
+                print(f"✘ Folio no encontrado: {folio_id}")
+            for inst in instances:
+                all_folios_rects_on_page.append({'folio_id': folio_id, 'rect': inst})
+
+        # Helper para buscar el folio más cercano
+        def find_closest_folio_data(target_rect):
+            if not all_folios_rects_on_page:
+                return None
+            closest_folio_data = None
+            min_distance = float('inf')
+            target_center_x = target_rect.x0 + target_rect.width / 2
+            target_center_y = target_rect.y0 + target_rect.height / 2
+            for folio_entry in all_folios_rects_on_page:
+                folio_rect = folio_entry['rect']
+                folio_center_x = folio_rect.x0 + folio_rect.width / 2
+                folio_center_y = folio_rect.y0 + folio_rect.height / 2
+                distance = ((target_center_x - folio_center_x)**2 + (target_center_y - folio_center_y)**2)**0.5
+                if distance < min_distance:
+                    min_distance = distance
+                    closest_folio_data = folio_to_info_map[folio_entry['folio_id']]
+            return closest_folio_data
+
+        # --- Ronda sobre "Departamento" ---
+        dept_instances = page.search_for("Departamento", flags=search_flags)
+        for dept_rect in dept_instances:
+            relevant_folio_data = find_closest_folio_data(dept_rect)
+            if relevant_folio_data:
+                ronda_text = f"Ronda {relevant_folio_data['ronda']}"
+                text_rect = fitz.Rect(
+                    dept_rect.x0 + X_OFFSET_ANNOTATIONS,
+                    dept_rect.y0 + Y_OFFSET_ABOVE_DEPT,
+                    dept_rect.x0 + X_OFFSET_ANNOTATIONS + ANNOTATION_WIDTH,
+                    dept_rect.y0 + Y_OFFSET_ABOVE_DEPT + ANNOTATION_HEIGHT
+                )
+                annot = page.add_freetext_annot(
+                    text_rect,
+                    ronda_text,
+                    fontsize=10,
+                    fontname="helvB",
+                    text_color=(0, 0, 0),
+                    fill_color=None,
+                    align=0
+                )
+                annot.update()
+
+        # --- Operador ---
+        operador_instances = page.search_for("Operador:", flags=search_flags)
+        for operador_rect in operador_instances:
+            relevant_folio_data = find_closest_folio_data(operador_rect)
+            if relevant_folio_data:
+                operario_text = f"{relevant_folio_data['operario']}"
+                text_rect = fitz.Rect(
+                    operador_rect.x1 + X_OFFSET_RIGHT_OF_LABEL,
+                    operador_rect.y0,
+                    operador_rect.x1 + X_OFFSET_RIGHT_OF_LABEL + ANNOTATION_WIDTH,
+                    operador_rect.y0 + ANNOTATION_HEIGHT
+                )
+                annot = page.add_freetext_annot(
+                    text_rect,
+                    operario_text,
+                    fontsize=10,
+                    fontname="helvB",
+                    text_color=(0, 0, 0),
+                    fill_color=None,
+                    align=0
+                )
+                annot.update()
+
+        # --- Equipo ---
+        equipo_instances = page.search_for("Equipo:", flags=search_flags)
+        for equipo_rect in equipo_instances:
+            relevant_folio_data = find_closest_folio_data(equipo_rect)
+            if relevant_folio_data:
+                maquina_text = f"{relevant_folio_data['maquina']}"
+                text_rect = fitz.Rect(
+                    equipo_rect.x1 + X_OFFSET_RIGHT_OF_LABEL,
+                    equipo_rect.y0,
+                    equipo_rect.x1 + X_OFFSET_RIGHT_OF_LABEL + ANNOTATION_WIDTH,
+                    equipo_rect.y0 + ANNOTATION_HEIGHT
+                )
+                annot = page.add_freetext_annot(
+                    text_rect,
+                    maquina_text,
+                    fontsize=10,
+                    fontname="helvB",
+                    text_color=(0, 0, 0),
+                    fill_color=None,
+                    align=0
+                )
+                annot.update()
+
+        # --- Resaltado de casillas extra ---
+        for search_text in search_texts:
+            text_instances = page.search_for(search_text, flags=search_flags)
+            if text_instances:
+                print(f"✔ Código encontrado: {search_text}")
+                last_instance = text_instances[-1]
+                estimated_char_width = last_instance.width / len(search_text) if search_text else 10
+                estimated_width_per_casilla = 15 if estimated_char_width < 5 else estimated_char_width * 3
+                extra_width = estimated_width_per_casilla * num_casillas_extra
+                extended_rect = fitz.Rect(
+                    last_instance.x0, last_instance.y0,
+                    last_instance.x1 + extra_width, last_instance.y1
+                )
+                highlight = page.add_highlight_annot(extended_rect)
+                highlight.set_colors(stroke=(0.7, 0.7, 0.7))
+                highlight.update()
+            else:
+                print(f"✘ Código no encontrado: {search_text}")
+
+    doc.save(temp_output_path)
+    doc.close()
+    return temp_output_path
+
+
+@app.route("/procesar_pdf", methods=["POST"])
+def procesar_pdf():
+    if "file" not in request.files:
+        return "No se subió ningún archivo", 400
+
+    cargas_data = request.form.get("cargas", "[]")
     try:
-        # Manejar preflight requests
-        if request.method == "OPTIONS":
-            return "", 200
-            
-        if "file" not in request.files:
-            return json.dumps({"error": "No se subió ningún archivo"}), 400
+        cargas = json.loads(cargas_data)
+    except json.JSONDecodeError:
+        print(f"Error decodificando 'cargas_data': {cargas_data}")
+        return "Formato de 'cargas' inválido", 400
 
-        # Obtener datos de cargas
-        cargas_data = request.form.get("cargas", "[]")
-        try:
-            cargas = json.loads(cargas_data)
-        except json.JSONDecodeError:
-            return json.dumps({"error": "Formato de 'cargas' inválido"}), 400
+    file = request.files["file"]
 
-        file = request.files["file"]
+    input_fd, input_path = tempfile.mkstemp(suffix=".pdf")
+    os.close(input_fd)
+    file.save(input_path)
 
-        # Validar tipo de archivo
-        if not file.filename.lower().endswith('.pdf'):
-            return json.dumps({"error": "Solo se permiten archivos PDF"}), 400
-
-        # Guardar archivo temporal
-        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp_in:
-            file.save(tmp_in.name)
-            input_path = tmp_in.name
-
-        # Lista optimizada de términos de búsqueda
-        search_terms = [
-           "AAE70", "AAM10", "AAM11", "AAM12", "AAN20", "AAN30", "AAN50",
+    search_terms = [
+    "AAE70", "AAM10", "AAM11", "AAM12", "AAN20", "AAN30", "AAN50",
     "AAP10", "AAY10", "ABA10", "ABA20", "ABA30", "ABA31", "ABB20",
     "ABL10", "ABV30", "ACA10", "ACC10", "ACC20", "ACT20", "ADC10",
     "ADC30", "ADG10", "ADI10", "ADI20", "ADI30", "ADL10", "ADN10",
@@ -268,42 +235,30 @@ def procesar_pdf():
     "SMI10", "SNI10", "SPM10", "SSO10", "STO10", "TAM30", "TMB10",
     "TMB11", "TMB12", "TRX20", "TRX40", "TTI06", "TTI50", "VPS10",
     "AAB80", "AAS10", "AAV10", "AAH30", "AHG10"
-        ]
+];
 
-        # Procesar PDF
-        output_path = highlight_pdf_with_rondas_folios(
-            input_path, 
-            search_terms, 
-            cargas,
-            max_pages=50  # Limitar a 50 páginas máximo
-        )
 
-        # Enviar respuesta
-        return send_file(
-            output_path,
-            as_attachment=True,
-            download_name="resultado_rondas_y_folios.pdf",
-            mimetype="application/pdf"
-        )
+    output_path = highlight_pdf_with_rondas_folios(
+        input_path,
+        search_terms,
+        cargas
+    )
 
-    except Exception as e:
-        print(f"Error procesando PDF: {str(e)}")
-        return json.dumps({"error": f"Error procesando PDF: {str(e)}"}), 500
+    response = send_file(
+        output_path,
+        as_attachment=True,
+        download_name=f"resultado_rondas_y_folios.pdf",
+        mimetype="application/pdf"
+    )
 
-    finally:
-        # Limpieza de archivos temporales
+    @response.call_on_close
+    def cleanup():
         try:
-            if input_path and os.path.exists(input_path):
-                os.remove(input_path)
-            if output_path and os.path.exists(output_path):
-                os.remove(output_path)
-        except:
-            pass
+            os.remove(input_path)
+            os.remove(output_path)
+        except OSError as e:
+            print(f"Error durante la limpieza de archivos temporales: {e}")
 
-@app.route('/health', methods=['GET'])
-def health_check():
-    """Endpoint de salud para verificar que el servidor está funcionando"""
-    return json.dumps({"status": "healthy", "message": "Servidor funcionando correctamente"})
+    return response
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5003, debug=True)
+# Se quita el bloque `if __name__ == "__main__"` ya que Render lo ejecutará con Gunicorn.
